@@ -1,7 +1,7 @@
 /**
  * Enhanced Web Search Module
- * Provides intelligent web search with context injection, fallbacks, and result formatting
- * Integrates with Anthropic's web_search tool and provides pre-formatted results
+ * Properly integrates web search results with context injection
+ * Handles real-time queries (time, date, weather, location-based)
  */
 
 export interface SearchResult {
@@ -11,18 +11,11 @@ export interface SearchResult {
   snippet?: string;
 }
 
-export interface SearchContext {
-  query: string;
-  results: SearchResult[];
-  formattedContext: string;
-  source: "anthropic" | "web_search" | "local_context";
-}
-
 /**
  * Get current time and date context
- * Useful for time/date questions that don't need web search
+ * Always available - no API calls needed
  */
-export function getCurrentTimeContext(): string {
+export function getTimeContext(): string {
   const now = new Date();
   const timeStr = now.toLocaleTimeString("en-GB", {
     hour: "2-digit",
@@ -36,112 +29,113 @@ export function getCurrentTimeContext(): string {
     month: "long",
     day: "numeric",
   });
-
-  return `CURRENT TIME & DATE:\nTime: ${timeStr}\nDate: ${dateStr}`;
+  return `Current time: ${timeStr}\nCurrent date: ${dateStr}`;
 }
 
 /**
- * Detect if a query is about time/date (local, no web search needed)
+ * Get weather context for a location
+ * Uses Open-Meteo (free, no API key needed)
  */
-export function isTimeOrDateQuery(query: string): boolean {
-  const timeKeywords = [
-    "what time",
-    "current time",
-    "what's the time",
-    "tell me the time",
-    "whats the time",
-    "time is",
-    "current date",
-    "what date",
-    "whats the date",
-    "today's date",
-    "todays date",
-    "what day",
-    "day of week",
+export async function getWeatherContext(
+  lat: number,
+  lon: number,
+  city?: string
+): Promise<string> {
+  try {
+    const wRes = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`
+    );
+
+    const w = await wRes.json();
+    if (!w.current_weather) return "";
+
+    const WMO_CODES: Record<number, string> = {
+      0: "Clear sky",
+      1: "Mainly clear",
+      2: "Partly cloudy",
+      3: "Overcast",
+      45: "Foggy",
+      48: "Icy fog",
+      51: "Light drizzle",
+      53: "Drizzle",
+      55: "Heavy drizzle",
+      61: "Light rain",
+      63: "Moderate rain",
+      65: "Heavy rain",
+      71: "Light snow",
+      73: "Snow",
+      75: "Heavy snow",
+      80: "Showers",
+      81: "Heavy showers",
+      82: "Violent showers",
+      95: "Thunderstorm",
+      96: "Thunderstorm & hail",
+    };
+
+    const temp = Math.round(w.current_weather.temperature);
+    const windspeed = Math.round(w.current_weather.windspeed);
+    const condition =
+      WMO_CODES[w.current_weather.weathercode] || "Unknown condition";
+    const cityName = city || "Your location";
+
+    return `CURRENT WEATHER in ${cityName}:\nTemperature: ${temp}°C\nCondition: ${condition}\nWind speed: ${windspeed} km/h`;
+  } catch (error) {
+    console.error("Weather context failed:", error);
+    return "";
+  }
+}
+
+/**
+ * Build enhanced system context with real-time information
+ */
+export async function buildEnhancedSystemContext(
+  baseSystem: string,
+  location?: { lat: number; lon: number; city?: string } | null
+): Promise<string> {
+  const timeContext = getTimeContext();
+  let weatherContext = "";
+
+  if (location?.lat && location?.lon) {
+    weatherContext = await getWeatherContext(
+      location.lat,
+      location.lon,
+      location.city
+    );
+  }
+
+  const contextParts = [baseSystem, timeContext];
+  if (weatherContext) contextParts.push(weatherContext);
+
+  return contextParts.join("\n\n");
+}
+
+/**
+ * Check if query is obviously local (no web search needed)
+ */
+export function isLocalQuery(query: string): boolean {
+  const localPatterns = [
+    /^what time is it/i,
+    /^what's the time/i,
+    /^what is the current time/i,
+    /^tell me the time/i,
+    /^what is today/i,
+    /^what's today/i,
+    /^what date is it/i,
   ];
 
-  const lowerQuery = query.toLowerCase();
-  return timeKeywords.some((kw) => lowerQuery.includes(kw));
+  return localPatterns.some((pattern) => pattern.test(query));
 }
 
 /**
- * Detect if a query needs web search
- * Returns true for queries about current events, real-time info, etc.
+ * Extract search intent for query classification
  */
-export function shouldPerformWebSearch(query: string): boolean {
-  // Don't search for time/date queries
-  if (isTimeOrDateQuery(query)) return false;
-
-  const searchKeywords = [
-    "what is",
-    "what are",
-    "current",
-    "latest",
-    "news",
-    "today",
-    "weather",
-    "temperature",
-    "search",
-    "find",
-    "look up",
-    "what's",
-    "whats",
-    "how",
-    "when",
-    "where",
-    "price",
-    "rate",
-    "stock",
-    "trending",
-    "top",
-    "tell me about",
-    "explain",
-    "who is",
-    "whos",
-    "is",
-  ];
-
-  const lowerQuery = query.toLowerCase();
-  return searchKeywords.some((keyword) => lowerQuery.includes(keyword));
-}
-
-/**
- * Extract query intent for smarter web search routing
- */
-export function extractSearchIntent(
-  query: string
-): {
-  intent: "time" | "weather" | "news" | "general" | "factual";
+export function extractSearchIntent(query: string): {
+  intent: "time" | "weather" | "news" | "general";
   cleanQuery: string;
 } {
-  const timeKeywords = ["time", "current time", "what time", "date", "day"];
-  const weatherKeywords = [
-    "weather",
-    "temperature",
-    "rain",
-    "forecast",
-    "sunny",
-    "cloudy",
-    "wind",
-  ];
-  const newsKeywords = [
-    "news",
-    "latest",
-    "trending",
-    "breaking",
-    "today",
-    "recent",
-    "current events",
-  ];
-  const factualKeywords = [
-    "what is",
-    "who is",
-    "explain",
-    "define",
-    "tell me",
-    "facts",
-    "information",
-  ];
+  const timeKeywords = ["time", "what time", "current time"];
+  const weatherKeywords = ["weather", "temperature", "rain", "forecast"];
+  const newsKeywords = ["news", "latest", "trending", "breaking"];
 
   const lowerQuery = query.toLowerCase();
 
@@ -157,127 +151,5 @@ export function extractSearchIntent(
     return { intent: "news", cleanQuery: query };
   }
 
-  if (factualKeywords.some((kw) => lowerQuery.includes(kw))) {
-    return { intent: "factual", cleanQuery: query };
-  }
-
   return { intent: "general", cleanQuery: query };
-}
-
-/**
- * Format search results into enhanced context for the LLM
- * Includes ranking, snippets, and source attribution
- */
-export function formatSearchResultsForContext(
-  results: SearchResult[],
-  query: string
-): string {
-  if (!results.length) {
-    return `[SEARCH COMPLETED] No results found for: "${query}"`;
-  }
-
-  const formatted = results
-    .slice(0, 5) // Top 5 results
-    .map(
-      (r, i) =>
-        `[Result ${i + 1}] ${r.title}
-URL: ${r.url}
-Summary: ${r.snippet || r.content.slice(0, 200)}...`
-    )
-    .join("\n\n");
-
-  return `[WEB SEARCH RESULTS for "${query}"]
-\n${formatted}
-
-[END SEARCH RESULTS]`;
-}
-
-/**
- * Build enhanced system prompt with context
- */
-export function buildContextualSystemPrompt(
-  baseSystem: string,
-  timeContext?: string,
-  weatherContext?: string,
-  locationContext?: string
-): string {
-  const contextParts: string[] = [baseSystem];
-
-  if (timeContext) {
-    contextParts.push(`\n\n${timeContext}`);
-  }
-
-  if (weatherContext) {
-    contextParts.push(`\n\n${weatherContext}`);
-  }
-
-  if (locationContext) {
-    contextParts.push(`\n\n${locationContext}`);
-  }
-
-  return contextParts.join("");
-}
-
-/**
- * Process web search tool results from Anthropic
- * Converts tool calls into properly formatted context
- */
-export function processAnthropicToolResults(
-  toolUseBlocks: any[],
-  toolResults: any[]
-): { searches: string[]; formattedContext: string } {
-  const searches: string[] = [];
-  const contextLines: string[] = [];
-
-  for (const toolUse of toolUseBlocks) {
-    if (toolUse.name === "web_search") {
-      const query = toolUse.input?.query || "unknown";
-      searches.push(query);
-      contextLines.push(`[SEARCHED] "${query}"`);
-    }
-  }
-
-  return {
-    searches,
-    formattedContext:
-      contextLines.length > 0
-        ? contextLines.join("\n")
-        : "[No web searches performed]",
-  };
-}
-
-/**
- * Validate and sanitize search query for API calls
- */
-export function sanitizeSearchQuery(query: string): string {
-  return query
-    .trim()
-    .slice(0, 300) // Limit length
-    .replace(/[<>]/g, "") // Remove angle brackets
-    .replace(/\s+/g, " "); // Normalize whitespace
-}
-
-/**
- * Get enhanced weather context string
- */
-export function buildWeatherContext(weatherData: {
-  temp: number;
-  condition: string;
-  city: string;
-  windspeed?: number;
-}): string {
-  const windInfo =
-    weatherData.windspeed !== undefined ? ` Wind: ${weatherData.windspeed} km/h` : "";
-  return `CURRENT WEATHER:\nLocation: ${weatherData.city}\nTemperature: ${weatherData.temp}°C\nCondition: ${weatherData.condition}${windInfo}`;
-}
-
-/**
- * Get location context string
- */
-export function buildLocationContext(location: {
-  lat: number;
-  lon: number;
-  city?: string;
-}): string {
-  return `LOCATION CONTEXT:\nCoordinates: ${location.lat.toFixed(4)}, ${location.lon.toFixed(4)}${location.city ? `\nCity: ${location.city}` : ""}`;
 }

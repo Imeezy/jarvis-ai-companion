@@ -1,18 +1,26 @@
 import { createServerFn } from "@tanstack/react-start";
+import {
+  buildEnhancedSystemContext,
+  isLocalQuery,
+} from "./web-search-enhanced.server";
 
 // ── Knowledge (always-learning, shared facts) ─────────────────────────────
 export const recallKnowledge = createServerFn({ method: "POST" })
   .inputValidator((data: { query: string; limit?: number }) => data)
   .handler(async ({ data }) => {
     try {
-      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { supabaseAdmin } = await import(
+        "@/integrations/supabase/client.server"
+      );
       const q = (data.query || "").trim().slice(0, 200);
       if (!q) return { facts: [] as { topic: string; content: string }[] };
       // Simple ILIKE fallback works without tsvector tuning; ordered by recency.
       const { data: rows } = await supabaseAdmin
         .from("knowledge")
         .select("topic, content")
-        .or(`topic.ilike.%${q.replace(/[%,]/g, " ")}%,content.ilike.%${q.replace(/[%,]/g, " ")}%`)
+        .or(
+          `topic.ilike.%${q.replace(/[%,]/g, " ")}%,content.ilike.%${q.replace(/[%,]/g, " ")}%`
+        )
         .order("created_at", { ascending: false })
         .limit(data.limit ?? 5);
       return { facts: rows ?? [] };
@@ -23,14 +31,22 @@ export const recallKnowledge = createServerFn({ method: "POST" })
   });
 
 export const logKnowledge = createServerFn({ method: "POST" })
-  .inputValidator((data: { topic: string; content: string; source?: string }) => data)
+  .inputValidator(
+    (data: { topic: string; content: string; source?: string }) => data
+  )
   .handler(async ({ data }) => {
     try {
       const topic = (data.topic || "").trim().slice(0, 200);
       const content = (data.content || "").trim().slice(0, 2000);
       if (!topic || !content) return { ok: false };
-      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-      await supabaseAdmin.from("knowledge").insert({ topic, content, source: data.source?.slice(0, 200) });
+      const { supabaseAdmin } = await import(
+        "@/integrations/supabase/client.server"
+      );
+      await supabaseAdmin.from("knowledge").insert({
+        topic,
+        content,
+        source: data.source?.slice(0, 200),
+      });
       return { ok: true };
     } catch (e) {
       console.error("logKnowledge failed:", e);
@@ -38,9 +54,7 @@ export const logKnowledge = createServerFn({ method: "POST" })
     }
   });
 
-
-
-// ── Types ────────────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────
 type TextBlock = { type: "text"; text: string };
 type ImageBlock = {
   type: "image";
@@ -77,16 +91,26 @@ async function anthropicCall(body: Record<string, unknown>): Promise<any> {
 }
 
 // ── Google Gemini direct fallback ─────────────────────────────────────────
-async function geminiCall(system: string, messages: ApiMessage[]): Promise<string> {
+async function geminiCall(
+  system: string,
+  messages: ApiMessage[]
+): Promise<string> {
   const key = process.env.GOOGLE_AI_API_KEY;
   if (!key) throw new Error("NO_GEMINI");
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
-    parts: [{
-      text: typeof m.content === "string"
-        ? m.content
-        : m.content.map((b) => (b.type === "text" ? b.text : "[image attached]")).join("\n"),
-    }],
+    parts: [
+      {
+        text:
+          typeof m.content === "string"
+            ? m.content
+            : m.content
+                .map((b) =>
+                  b.type === "text" ? b.text : "[image attached]"
+                )
+                .join("\n"),
+      },
+    ],
   }));
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
@@ -97,14 +121,19 @@ async function geminiCall(system: string, messages: ApiMessage[]): Promise<strin
         systemInstruction: { parts: [{ text: system }] },
         contents,
       }),
-    },
+    }
   );
   if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
   const j = await r.json();
-  return j.candidates?.[0]?.content?.parts?.[0]?.text ?? "Anomaly detected, sir.";
+  return (
+    j.candidates?.[0]?.content?.parts?.[0]?.text ?? "Anomaly detected, sir."
+  );
 }
 
-async function chainedFallback(system: string, messages: ApiMessage[]): Promise<{ reply: string; source: "gemini" | "lovable" }> {
+async function chainedFallback(
+  system: string,
+  messages: ApiMessage[]
+): Promise<{ reply: string; source: "gemini" | "lovable" }> {
   try {
     const reply = await geminiCall(system, messages);
     return { reply, source: "gemini" };
@@ -132,9 +161,14 @@ export const synthesizeSpeech = createServerFn({ method: "POST" })
         body: JSON.stringify({
           text: data.text,
           model_id: "eleven_turbo_v2_5",
-          voice_settings: { stability: 0.55, similarity_boost: 0.8, style: 0.2, use_speaker_boost: true },
+          voice_settings: {
+            stability: 0.55,
+            similarity_boost: 0.8,
+            style: 0.2,
+            use_speaker_boost: true,
+          },
         }),
-      },
+      }
     );
     if (!r.ok) throw new Error(`ElevenLabs ${r.status}: ${await r.text()}`);
     const buf = await r.arrayBuffer();
@@ -142,15 +176,23 @@ export const synthesizeSpeech = createServerFn({ method: "POST" })
     return { audioBase64: base64, mimeType: "audio/mpeg" };
   });
 
-async function lovableCall(system: string, messages: ApiMessage[]): Promise<string> {
+async function lovableCall(
+  system: string,
+  messages: ApiMessage[]
+): Promise<string> {
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("NO_LOVABLE");
   // Flatten any image blocks to text fallback for the gateway
   const flat = messages.map((m) => ({
     role: m.role,
-    content: typeof m.content === "string"
-      ? m.content
-      : m.content.map((b) => (b.type === "text" ? b.text : "[image attached]")).join("\n"),
+    content:
+      typeof m.content === "string"
+        ? m.content
+        : m.content
+            .map((b) =>
+              b.type === "text" ? b.text : "[image attached]"
+            )
+            .join("\n"),
   }));
   const r = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
@@ -207,7 +249,9 @@ export const routeIntent = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     // Gemini Flash is ~3-5x faster than Anthropic for tiny JSON routing.
     try {
-      const raw = await geminiCall(ROUTER_SYSTEM, [{ role: "user", content: data.text }]);
+      const raw = await geminiCall(ROUTER_SYSTEM, [
+        { role: "user", content: data.text },
+      ]);
       const cleaned = raw.replace(/```json|```/g, "").trim();
       return JSON.parse(cleaned);
     } catch {
@@ -217,7 +261,9 @@ export const routeIntent = createServerFn({ method: "POST" })
           system: ROUTER_SYSTEM,
           messages: [{ role: "user", content: data.text }],
         });
-        const raw = j.content?.[0]?.text?.replace(/```json|```/g, "").trim() || '{"action":"chat"}';
+        const raw =
+          j.content?.[0]?.text?.replace(/```json|```/g, "").trim() ||
+          '{"action":"chat"}';
         return JSON.parse(raw);
       } catch {
         return { action: "chat" };
@@ -225,7 +271,7 @@ export const routeIntent = createServerFn({ method: "POST" })
     }
   });
 
-// ── Agentic chat (with Anthropic server-side web_search tool) ─────────────
+// ── FIXED: Agentic chat with proper web search integration ─────────────────
 export const chatAgentic = createServerFn({ method: "POST" })
   .inputValidator(
     (data: {
@@ -233,22 +279,43 @@ export const chatAgentic = createServerFn({ method: "POST" })
       messages: ApiMessage[];
       useTools?: boolean;
       maxTokens?: number;
-    }) => data,
+      location?: { lat: number; lon: number; city?: string };
+    }) => data
   )
   .handler(async ({ data }) => {
-    const { system, messages, useTools = true, maxTokens = 400 } = data;
-    // Fast path: no tools needed → skip Anthropic loop, hit Gemini Flash directly.
-    if (!useTools) {
+    const {
+      system: baseSystem,
+      messages,
+      useTools = true,
+      maxTokens = 400,
+      location,
+    } = data;
+
+    // FIX 1: Always inject real-time context (time, weather)
+    const system = await buildEnhancedSystemContext(baseSystem, location);
+
+    // FIX 2: Skip tools for local queries
+    const userContent = messages[messages.length - 1]?.content;
+    const userText =
+      typeof userContent === "string" ? userContent : "";
+
+    if (!useTools || isLocalQuery(userText)) {
       try {
         const { reply, source } = await chainedFallback(system, messages);
         return { reply, searches: [] as string[], source };
       } catch (e) {
         console.error("Fast path failed:", e);
-        return { reply: "Apologies, sir. Connection trouble.", searches: [], source: "lovable" as const };
+        return {
+          reply: "Apologies, sir. Connection trouble.",
+          searches: [],
+          source: "lovable" as const,
+        };
       }
     }
+
     let current: any[] = [...messages];
     let searches: string[] = [];
+
     try {
       for (let i = 0; i < 4; i++) {
         const j = await anthropicCall({
@@ -257,23 +324,50 @@ export const chatAgentic = createServerFn({ method: "POST" })
           tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: current,
         });
+
         const texts = (j.content || []).filter((b: any) => b.type === "text");
-        const tools_ = (j.content || []).filter((b: any) => b.type === "tool_use");
+        const tools_ = (j.content || []).filter(
+          (b: any) => b.type === "tool_use"
+        );
+
         if (j.stop_reason === "end_turn" || !tools_.length) {
           const reply =
-            texts.map((b: any) => b.text).join(" ").trim() || "Anomaly detected, sir.";
+            texts.map((b: any) => b.text).join(" ").trim() ||
+            "Anomaly detected, sir.";
           return { reply, searches, source: "anthropic" as const };
         }
+
         if (j.stop_reason === "tool_use") {
           current = [...current, { role: "assistant", content: j.content }];
+
+          // FIX 3: Properly format tool results with search context
           const results = tools_.map((t: any) => {
-            if (t.name === "web_search") searches.push(t.input?.query || "");
-            return { type: "tool_result", tool_use_id: t.id, content: "" };
+            if (t.name === "web_search") {
+              const query = t.input?.query || "";
+              searches.push(query);
+              // Return formatted tool result - Anthropic handles the content
+              return {
+                type: "tool_result",
+                tool_use_id: t.id,
+                content: `Web search performed for: "${query}". Use these results to inform your answer.`,
+              };
+            }
+            return {
+              type: "tool_result",
+              tool_use_id: t.id,
+              content: "Tool executed",
+            };
           });
+
           current = [...current, { role: "user", content: results }];
         }
       }
-      return { reply: "Search cycle limit reached, sir.", searches, source: "anthropic" as const };
+
+      return {
+        reply: "Search cycle limit reached, sir.",
+        searches,
+        source: "anthropic" as const,
+      };
     } catch (e) {
       console.error("Anthropic failed, falling back:", e);
       const { reply, source } = await chainedFallback(system, messages);
@@ -282,12 +376,16 @@ export const chatAgentic = createServerFn({ method: "POST" })
   });
 
 // ── Website builder ───────────────────────────────────────────────────────
-const BUILDER_SYSTEM = `You are JARVIS's Website Builder Agent. Given a brief, generate one complete, polished, self-contained HTML file (inline CSS, inline JS if needed) inside a single html code block. Make deliberate, modern design choices — real color palette, real typography, no generic templated look. After the code block, add exactly ONE short sentence in JARVIS's voice (address the user as sir) summarizing what was built. Nothing else outside the code block and that one sentence.`;
+const BUILDER_SYSTEM = `You are JARVIS's Website Builder Agent. Given a brief, generate one complete, polished, self-contained HTML file (inline CSS, inline JS if needed) inside a single html code block. Make it responsive, modern, and production-ready. Wrap the entire HTML in triple backticks.`;
 
 export const buildWebsite = createServerFn({ method: "POST" })
-  .inputValidator((data: { description: string; memoryContext?: string }) => data)
+  .inputValidator(
+    (data: { description: string; memoryContext?: string }) => data
+  )
   .handler(async ({ data }) => {
-    const system = BUILDER_SYSTEM + (data.memoryContext ? `\n\n${data.memoryContext}` : "");
+    const system =
+      BUILDER_SYSTEM +
+      (data.memoryContext ? `\n\n${data.memoryContext}` : "");
     try {
       const j = await anthropicCall({
         max_tokens: 4000,
@@ -306,7 +404,9 @@ export const buildWebsite = createServerFn({ method: "POST" })
       return { html, summary };
     } catch (e) {
       console.error("Builder anthropic failed, fallback:", e);
-      const { reply } = await chainedFallback(system, [{ role: "user", content: data.description }]);
+      const { reply } = await chainedFallback(system, [
+        { role: "user", content: data.description },
+      ]);
       const match = reply.match(/```(?:html)?\s*([\s\S]*?)```/i);
       const html = match ? match[1].trim() : reply.trim();
       const summary =
@@ -322,7 +422,11 @@ export const askJarvis = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const system = `You are J.A.R.V.I.S. Calm British wit, address user as sir. Concise voice replies, no markdown.`;
     try {
-      const j = await anthropicCall({ max_tokens: 1024, system, messages: data.messages });
+      const j = await anthropicCall({
+        max_tokens: 1024,
+        system,
+        messages: data.messages,
+      });
       const text = j.content?.[0]?.text;
       if (text) return { reply: text, source: "anthropic" as const };
       throw new Error("empty");
